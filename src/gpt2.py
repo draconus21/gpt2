@@ -5,6 +5,9 @@ from torch.nn import functional as F
 from pydantic import BaseModel
 
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
 class Config(BaseModel):
     block_size: int = 1024
     vocab_size: int = 50257
@@ -45,7 +48,7 @@ class CausalSelfAttention(nn.Module):
         # nh: number of heads, hs: head size, c: number of channels (hs*ns)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        v = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
         # compute attention
         attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))  # (B, nh, T, T)
@@ -85,8 +88,8 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
-        x = x + self.attn(self.ln1(x))
-        x = x + self.MLP(self.ln2(x))
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
         return x
 
 
@@ -102,6 +105,25 @@ class GPT(nn.Module):
             )
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.config = config
+
+    def forward(self, idx):
+        B, T = idx.size()
+        assert (
+            T <= self.config.block_size
+        ), f"Cannot forward sequnce of length {T}, block size (max sequence length) is {self.config.block_size}"
+
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        pos_emb = self.transformer.wpe(pos)  # (B, T)
+        tok_emb = self.transformer.wte(idx)  # (B, T, C)
+        x = tok_emb + pos_emb  # (B, T, C)
+
+        for block in self.transformer.h:
+            x = block(x)
+
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)  # (B, T, vocab_size)
+        return logits
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -109,6 +131,7 @@ class GPT(nn.Module):
 
         assert model_type in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}
 
+        print(f"loading pretrained weights from hugging face for {model_type}")
         gpt_config = {
             "gpt2": dict(n_layer=12, n_head=12, n_embd=768),
             "gpt2-medium": dict(n_layer=24, n_head=16, n_embd=1024),
@@ -149,4 +172,46 @@ class GPT(nn.Module):
         return model
 
 
-GPT.from_pretrained("gpt2")
+model = GPT.from_pretrained("gpt2")
+model.eval()
+model.to(device)
+
+# prefix tokens
+top_k = 50
+max_length = 30
+num_return_sequences = 5
+
+prefix_str = "Hello, I am a language model,"
+
+import tiktoken
+
+enc = tiktoken.get_encoding("gpt2")
+tokens = enc.encode(prefix_str)
+tokens = torch.tensor(tokens, dtype=torch.long)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+x = tokens.to(device)  # (B, T)
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while (x.shape[1]) < max_length:
+    with torch.no_grad():
+        # get logits
+        logits = model(x)  # (B, T, vocab_size)
+        # we are interested only the in the last token
+        logits = logits[:, -1, :]  # (B, vocab_size)
+        # probs
+        probs = F.softmax(logits, dim=-1)
+        # keep only the top-k
+        topk_probs, topk_indices = torch.topk(probs, top_k, dim=-1)
+        # sample a token from topk
+        ix = torch.multinomial(topk_probs, 1)  # (B, 1) -> index of sample in vocabulary
+        # gather the corresponding indices
+        xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
+        # append to the sequence
+        x = torch.cat((x, xcol), dim=1)  # (B, T+1)
+
+# print the generated text
+for i in range(num_return_sequences):
+    tokens = x[i, :max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(f"> {decoded}")
