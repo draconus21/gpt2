@@ -6,14 +6,14 @@ from pydantic import BaseModel
 
 
 class Config(BaseModel):
-    block_size: int = 256
-    voacb_size: int = 65
-    n_layer: int = 6
-    n_head: int = 6
-    n_embd: int = 384
+    block_size: int = 1024
+    voacb_size: int = 50257
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
 
 
-class CausalSelfAttenion(nn.Module):
+class CausalSelfAttention(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
 
