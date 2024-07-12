@@ -25,6 +25,8 @@ class CausalSelfAttention(nn.Module):
 
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        # jank for init std scaling for residual pathways
+        self.c_proj.NANOGPT_USES_RESIDUAL = 1
 
         # regularization
         self.n_head = config.n_head
@@ -70,6 +72,8 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.gelu = nn.GELU(approximate="tanh")
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        # jank for init std scaling for residual pathways
+        self.c_proj.NANOGPT_USES_RESIDUAL = 1
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -108,9 +112,27 @@ class GPT(nn.Module):
         self.config = config
         self.device = None
 
+        # weight sharing scheme
+        self.transformer.wte.weight = self.lm_head.weight
+
+        # openai's init
+        self.apply(self._init_weights)
+
     def to(self, device: str):
         self.device = device
         return super().to(device)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, "NANOGPT_USES_RESIDUAL"):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
@@ -208,12 +230,21 @@ class GPT(nn.Module):
         return model
 
 
-if __name__ == "__main__":
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+def count_parameters(model):
+    """Counts the number of trainable parameters in a PyTorch model."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    n_epoch = 5000
+
+if __name__ == "__main__":
+    device = "cpu"
+    torch.manual_seed(1337)
+    if torch.cuda.is_available():
+        device = "cuda"
+        torch.cuda.manual_seed(1337)
+
+    print(f"device: {device}")
+
+    n_epoch = 50
     learning_rate = 3e-4
 
     train_loader = DataLoaderLite(B=4, T=32)
@@ -222,6 +253,7 @@ if __name__ == "__main__":
     model.to(device)
 
     try:
+        print(f"# trainable params: {count_parameters(model):_}")
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         for i in range(n_epoch):
             x, y = train_loader.next_batch()
