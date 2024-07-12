@@ -253,7 +253,7 @@ if __name__ == "__main__":
     train_loader = DataLoaderLite(B=2, T=1024)
     torch.set_float32_matmul_precision("high")  # no change
 
-    model = GPT(Config())
+    model = GPT(Config(vocab_size=50304))
     model.to(device)
 
     # gpu is too old for it :(
