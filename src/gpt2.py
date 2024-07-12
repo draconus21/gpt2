@@ -5,6 +5,8 @@ from torch import nn
 from torch.nn import functional as F
 from pydantic import BaseModel
 
+from dataloader import DataLoaderLite
+
 
 class Config(BaseModel):
     block_size: int = 1024
@@ -110,7 +112,7 @@ class GPT(nn.Module):
         self.device = device
         return super().to(device)
 
-    def forward(self, idx):
+    def forward(self, idx, targets=None):
         B, T = idx.size()
         assert (
             T <= self.config.block_size
@@ -126,7 +128,12 @@ class GPT(nn.Module):
 
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)  # (B, T, vocab_size)
-        return logits
+        if targets is None:
+            return logits, None
+
+        B, T, C = logits.shape
+        loss = F.cross_entropy(logits.view(B * T, C), targets.view(B * T))
+        return logits, loss
 
     def speak(self, prefix_str: str, *, num_return_sequences: int = 5, max_length: int = 30, top_k: int = 50):
         enc = tiktoken.get_encoding("gpt2")
@@ -135,12 +142,10 @@ class GPT(nn.Module):
         tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
         x = tokens.to(self.device)  # (B, T)
 
-        torch.manual_seed(42)
-        torch.cuda.manual_seed(42)
         while (x.shape[1]) < max_length:
             with torch.no_grad():
                 # get logits
-                logits = self(x)  # (B, T, vocab_size)
+                logits, _ = self(x)  # (B, T, vocab_size)
                 # we are interested only the in the last token
                 logits = logits[:, -1, :]  # (B, vocab_size)
                 # probs
@@ -204,15 +209,38 @@ class GPT(nn.Module):
 
 
 if __name__ == "__main__":
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    n_epoch = 5000
+    learning_rate = 3e-4
+
+    train_loader = DataLoaderLite(B=4, T=32)
 
     model = GPT(Config())
-    model.eval()
     model.to(device)
 
-    prefix_str = "Hello, I am a language model,"
-    preds = model.speak(prefix_str)
+    try:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+        for i in range(n_epoch):
+            x, y = train_loader.next_batch()
+            x = x.to(device)
+            y = y.to(device)
 
-    # print the generated text
-    for decoded in preds:
-        print(f"> {decoded}")
+            optimizer.zero_grad()
+            logits, loss = model(x, y)
+            loss.backward()
+            optimizer.step()
+            print(f"step {i}: loss: {loss.item()}")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        model.eval()
+
+        prefix_str = "Hello, I am a language model,"
+        preds = model.speak(prefix_str)
+
+        # print the generated text
+        for decoded in preds:
+            print(f"> {decoded}")
