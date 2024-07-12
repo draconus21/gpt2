@@ -1,5 +1,6 @@
 import math
 import torch
+import tiktoken
 from torch import nn
 from torch.nn import functional as F
 from pydantic import BaseModel
@@ -125,6 +126,34 @@ class GPT(nn.Module):
         logits = self.lm_head(x)  # (B, T, vocab_size)
         return logits
 
+    def speak(self, prefix_str: str, *, num_return_sequences: int = 5, max_length: int = 30, top_k: int = 50):
+        enc = tiktoken.get_encoding("gpt2")
+        tokens = enc.encode(prefix_str)
+        tokens = torch.tensor(tokens, dtype=torch.long)
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+        x = tokens.to(device)  # (B, T)
+
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        while (x.shape[1]) < max_length:
+            with torch.no_grad():
+                # get logits
+                logits = self(x)  # (B, T, vocab_size)
+                # we are interested only the in the last token
+                logits = logits[:, -1, :]  # (B, vocab_size)
+                # probs
+                probs = F.softmax(logits, dim=-1)
+                # keep only the top-k
+                topk_probs, topk_indices = torch.topk(probs, top_k, dim=-1)
+                # sample a token from topk
+                ix = torch.multinomial(topk_probs, 1)  # (B, 1) -> index of sample in vocabulary
+                # gather the corresponding indices
+                xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
+                # append to the sequence
+                x = torch.cat((x, xcol), dim=1)  # (B, T+1)
+
+        return [enc.decode(pred[:max_length].tolist()) for pred in x]
+
     @classmethod
     def from_pretrained(cls, model_type):
         """Loads pretrained GPT-2 model from huggingface"""
@@ -172,46 +201,14 @@ class GPT(nn.Module):
         return model
 
 
-model = GPT.from_pretrained("gpt2")
-model.eval()
-model.to(device)
+if __name__ == "__main__":
+    model = GPT(Config())
+    model.eval()
+    model.to(device)
 
-# prefix tokens
-top_k = 50
-max_length = 30
-num_return_sequences = 5
+    prefix_str = "Hello, I am a language model,"
+    preds = model.speak(prefix_str)
 
-prefix_str = "Hello, I am a language model,"
-
-import tiktoken
-
-enc = tiktoken.get_encoding("gpt2")
-tokens = enc.encode(prefix_str)
-tokens = torch.tensor(tokens, dtype=torch.long)
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-x = tokens.to(device)  # (B, T)
-
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-while (x.shape[1]) < max_length:
-    with torch.no_grad():
-        # get logits
-        logits = model(x)  # (B, T, vocab_size)
-        # we are interested only the in the last token
-        logits = logits[:, -1, :]  # (B, vocab_size)
-        # probs
-        probs = F.softmax(logits, dim=-1)
-        # keep only the top-k
-        topk_probs, topk_indices = torch.topk(probs, top_k, dim=-1)
-        # sample a token from topk
-        ix = torch.multinomial(topk_probs, 1)  # (B, 1) -> index of sample in vocabulary
-        # gather the corresponding indices
-        xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
-        # append to the sequence
-        x = torch.cat((x, xcol), dim=1)  # (B, T+1)
-
-# print the generated text
-for i in range(num_return_sequences):
-    tokens = x[i, :max_length].tolist()
-    decoded = enc.decode(tokens)
-    print(f"> {decoded}")
+    # print the generated text
+    for decoded in preds:
+        print(f"> {decoded}")
