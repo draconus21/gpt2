@@ -250,9 +250,13 @@ if __name__ == "__main__":
     learning_rate = 3e-4
 
     train_loader = DataLoaderLite(B=2, T=1024)
+    torch.set_float32_matmul_precision("high")  # no change
 
     model = GPT(Config())
     model.to(device)
+
+    # gpu is too old for it :(
+    # model = torch.compile(model)
 
     try:
         print(f"# trainable params: {count_parameters(model):_}")
@@ -264,6 +268,7 @@ if __name__ == "__main__":
             y = y.to(device)
 
             optimizer.zero_grad()
+            # with torch.autocast(device_type=device, dtype=torch.bfloat16):  # made it worse
             logits, loss = model(x, y)
             loss.backward()
             optimizer.step()
