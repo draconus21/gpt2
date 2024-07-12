@@ -53,11 +53,12 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
         # compute attention
-        attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))  # (B, nh, T, T)
-        # mask the future
-        attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-        attn = F.softmax(attn, dim=-1)
-        y = attn @ v  # (B, nh, T, hs)
+        # attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))  # (B, nh, T, T)
+        ## mask the future
+        # attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+        # attn = F.softmax(attn, dim=-1)
+        # y = attn @ v  # (B, nh, T, hs)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # (B, nh, T, hs) -> (B, T, nh, hs) -> (B, T, C)
 
         # ouput projection
