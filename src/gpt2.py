@@ -6,9 +6,6 @@ from torch.nn import functional as F
 from pydantic import BaseModel
 
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-
 class Config(BaseModel):
     block_size: int = 1024
     vocab_size: int = 50257
@@ -107,6 +104,11 @@ class GPT(nn.Module):
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.config = config
+        self.device = None
+
+    def to(self, device: str):
+        self.device = device
+        return super().to(device)
 
     def forward(self, idx):
         B, T = idx.size()
@@ -131,7 +133,7 @@ class GPT(nn.Module):
         tokens = enc.encode(prefix_str)
         tokens = torch.tensor(tokens, dtype=torch.long)
         tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-        x = tokens.to(device)  # (B, T)
+        x = tokens.to(self.device)  # (B, T)
 
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
@@ -202,6 +204,8 @@ class GPT(nn.Module):
 
 
 if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
     model = GPT(Config())
     model.eval()
     model.to(device)
