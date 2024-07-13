@@ -304,7 +304,18 @@ if __name__ == "__main__":
     betas = (0.9, 0.95)
     eps = 1e-8
 
-    train_loader = DataLoaderLite(B=2, T=1024)
+    # grad accumulation
+    total_batch_size = 2**19  # ~0.5M tokens = ~0.5M / 50304
+    B, T = 2, 1024  # micro_batch, seq length
+    assert (
+        total_batch_size % (B * T) == 0
+    ), f"total_batch_size [{total_batch_size}] not divisible by B*T [{B}*{T}={B*T}]"
+
+    grad_accum_steps = total_batch_size // (B * T)
+    print(f"total batch size: {total_batch_size}")
+    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+
+    train_loader = DataLoaderLite(B=B, T=T)
     torch.set_float32_matmul_precision("high")  # no change
 
     model = GPT(Config(vocab_size=50304))
@@ -320,14 +331,20 @@ if __name__ == "__main__":
         )
         for i in range(n_epoch):
             t0 = time.time()
-            x, y = train_loader.next_batch()
-            x = x.to(device)
-            y = y.to(device)
-
             optimizer.zero_grad()
-            # with torch.autocast(device_type=device, dtype=torch.bfloat16):  # made it worse
-            logits, loss = model(x, y)
-            loss.backward()
+
+            loss_accum = 0.0
+            for micro_batch in range(total_batch_size):
+                x, y = train_loader.next_batch()
+                x = x.to(device)
+                y = y.to(device)
+                # with torch.autocast(device_type=device, dtype=torch.bfloat16):  # made it worse
+                logits, loss = model(x, y)
+                loss_accum += loss.detach()
+
+                loss = loss / total_batch_size
+                loss.backward()
+
             norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             lr = learning_rate.get_lr(i)
             for param_group in optimizer.param_groups:
@@ -336,9 +353,9 @@ if __name__ == "__main__":
             torch.cuda.synchronize()
             t1 = time.time()
             dt = (t1 - t0) * 1000  # ms
-            tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+            tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1 - t0)
             print(
-                f"step {i:3d}: loss: {loss.item():.4f} | lr: {lr:.4e} | norm: {norm:.4f}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.1f}"
+                f"step {i:3d}: loss: {loss_accum.item():.4f} | lr: {lr:.4e} | norm: {norm:.4f}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.1f}"
             )
     except KeyboardInterrupt:
         pass
