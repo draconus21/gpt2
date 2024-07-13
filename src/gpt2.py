@@ -236,6 +236,28 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+class LRScheduler:
+    def __init__(self, max_lr, min_lr, warmup_steps, max_steps):
+        self.max_lr = max_lr
+        self.min_lr = min_lr
+        self.warmup_steps = warmup_steps
+        self.max_steps = max_steps
+
+    def get_lr(self, step):
+        # 1. linear warmup
+        if step < self.warmup_steps:
+            return self.max_lr * (step + 1) / self.warmup_steps
+        # 2. if step > lr_decal_steps, return min lr
+        if step > self.max_steps:
+            return self.min_lr
+
+        # 3. in between the two, use cosine decay down to min_lr
+        decay_ratio = (step - self.warmup_steps) / (self.max_steps - self.warmup_steps)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff starts at 1 and decays to 0
+        return self.min_lr + coeff * (self.max_lr - self.min_lr)
+
+
 if __name__ == "__main__":
     import time
 
@@ -247,8 +269,12 @@ if __name__ == "__main__":
 
     print(f"device: {device}")
 
-    n_epoch = 50
-    learning_rate = 3e-4
+    n_epoch = 50 * 8
+    warmup_steps = 10 * 8
+    max_lr = 6e-4
+    learning_rate = LRScheduler(max_lr=max_lr, min_lr=0.1 * max_lr, warmup_steps=warmup_steps, max_steps=n_epoch)
+    betas = (0.9, 0.95)
+    eps = 1e-8
 
     train_loader = DataLoaderLite(B=2, T=1024)
     torch.set_float32_matmul_precision("high")  # no change
@@ -261,7 +287,7 @@ if __name__ == "__main__":
 
     try:
         print(f"# trainable params: {count_parameters(model):_}")
-        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=betas, eps=eps)
         for i in range(n_epoch):
             t0 = time.time()
             x, y = train_loader.next_batch()
@@ -272,12 +298,18 @@ if __name__ == "__main__":
             # with torch.autocast(device_type=device, dtype=torch.bfloat16):  # made it worse
             logits, loss = model(x, y)
             loss.backward()
+            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            lr = learning_rate.get_lr(i)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
             optimizer.step()
             torch.cuda.synchronize()
             t1 = time.time()
             dt = (t1 - t0) * 1000  # ms
             tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
-            print(f"step {i}: loss: {loss.item()}: dt: {dt:.2f}ms, tok/sec: {tokens_per_sec}")
+            print(
+                f"step {i:3d}: loss: {loss.item():.4f} | lr: {lr:.4e} | norm: {norm:.4f}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.1f}"
+            )
     except KeyboardInterrupt:
         pass
     finally:
