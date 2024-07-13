@@ -286,16 +286,53 @@ class LRScheduler:
 
 
 if __name__ == "__main__":
+    import os
     import time
+    from torch.distributed import init_process_group, destroy_process_group
 
-    device = "cpu"
+    # set up DDP (Distributed Data Parallel)
+    # torchrun sets the env vars RANK, LOCAL_RANK, WORLD_SIZE
+    ddp = int(os.environ.get("RANK", -1)) != -1
+
+    if ddp:
+        assert torch.cuda.is_available(), "We need CUDA for DDP"
+        init_process_group("nccl")
+
+        ddp_rank = int(os.environ["RANK"])
+        ddp_local_rank = int(os.environ["LOCAL_RANK"])
+        ddp_world_size = int(os.environ["WORLD_SIZE"])
+        device = f"cuda:{ddp_local_rank}"
+        torch.cuda.set_device(device)
+        master_process = ddp_rank == 0  # this process will additionally do logging, checkpointing, etc.
+    else:
+        # vanilla, non-DDP
+        ddp_rank = 0
+        ddp_local_rank = 0
+        ddp_world_size = 1
+        master_process = True
+        # autodetect cuda
+        device = "cpu"
+        if torch.cuda.is_available():
+            device = "cuda"
+        print(f"using device: {device}")
+
     torch.manual_seed(1337)
     if torch.cuda.is_available():
-        device = "cuda"
         torch.cuda.manual_seed(1337)
 
-    print(f"device: {device}")
+    # grad accumulation
+    total_batch_size = 2**19  # ~0.5M tokens = ~0.5M / 50304
+    B, T = 2, 1024  # micro_batch, seq length
+    assert (
+        total_batch_size % (B * T * ddp_world_size) == 0
+    ), f"total_batch_size [{total_batch_size}] not divisible by B*T*ddp_world_size [{B}*{T}*{ddp_world_size}={B*T*ddp_world_size}]"
 
+    grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+    if master_process:
+        print(f"total batch size: {total_batch_size}")
+        print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+
+    sys.exit(0)
     n_epoch = 50 * 8
     warmup_steps = 10 * 8
     max_lr = 6e-4
@@ -304,18 +341,7 @@ if __name__ == "__main__":
     betas = (0.9, 0.95)
     eps = 1e-8
 
-    # grad accumulation
-    total_batch_size = 2**19  # ~0.5M tokens = ~0.5M / 50304
-    B, T = 2, 1024  # micro_batch, seq length
-    assert (
-        total_batch_size % (B * T) == 0
-    ), f"total_batch_size [{total_batch_size}] not divisible by B*T [{B}*{T}={B*T}]"
-
-    grad_accum_steps = total_batch_size // (B * T)
-    print(f"total batch size: {total_batch_size}")
-    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
-
-    train_loader = DataLoaderLite(B=B, T=T)
+    train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size)
     torch.set_float32_matmul_precision("high")  # no change
 
     model = GPT(Config(vocab_size=50304))
