@@ -22,7 +22,7 @@ class DataLoaderLite:
         self.tokens = torch.tensor(tokens)
 
         print(f"loaded {len(self.tokens):_} tokens")
-        print(f"1 epoch = {len(self.tokens)/(self.B * self.T)} batches")
+        print(f"1 epoch = {len(self.tokens[:-1])/(self.B * self.T)} batches")
 
     def next_batch(self):
         B, T = self.B, self.T
