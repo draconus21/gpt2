@@ -17,18 +17,24 @@ class DataLoaderLite:
         # trim to multiple of B*T
         n = len(tokens)
         excess = n % (self.B * self.T)
-        tokens = tokens[:-excess]
-        print(f"discarding {excess} out of {n} tokens")
+        tokens = tokens[: -(excess - 1)]  # Keep %(B*T)  + 1
+        print(f"discarding {excess} out of {n:_} tokens")
         self.tokens = torch.tensor(tokens)
 
-        print(f"loaded {len(self.tokens)} tokens")
+        print(f"loaded {len(self.tokens):_} tokens")
         print(f"1 epoch = {len(self.tokens)/(self.B * self.T)} batches")
 
     def next_batch(self):
         B, T = self.B, self.T
         buf = self.tokens[self.current_pos : self.current_pos + (B * T + 1)]
-        x = buf[:-1].view(B, T)
-        y = buf[1:].view(B, T)
+        try:
+            x = buf[:-1].view(B, T)
+            y = buf[1:].view(B, T)
+        except Exception as e:
+            print(f"current: {self.current_pos}, B: {B}, T:{T}, len buf: {buf.shape}, len tok: {self.tokens.shape}")
+            raise e
 
-        self.current_pos = self.current_pos + B * T
+        self.current_pos = (self.current_pos + B * T) % len(self.tokens - 1)
+        if len(self.tokens) - self.current_pos == 1:  # last one
+            self.current_pos = 0
         return x, y
