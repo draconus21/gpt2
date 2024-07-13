@@ -1,5 +1,6 @@
 import math
 import torch
+import inspect
 import tiktoken
 from torch import nn
 from torch.nn import functional as F
@@ -184,6 +185,32 @@ class GPT(nn.Module):
 
         return [enc.decode(pred[:max_length].tolist()) for pred in x]
 
+    def configure_optimizers(self, weight_decay, learning_rate, device, **kwargs):
+        # start with all candidate params that require grad
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+
+        # create optim groups. Any param that is 2+D will be weight decayed, otherwise no.
+        # i.e. all weight tensorsin matmuls + embeddings decay, all biases and layer norms don't
+        decay_params = [p for _, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for _, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": nodecay_params, "weight_decay": 0},
+        ]
+
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+
+        print(f"num decayed param tensors    : {len(decay_params):3d}, with {num_decay_params:_} params")
+        print(f"num non-decayed param tensors: {len(nodecay_params):3d}, with {num_nodecay_params:_} params")
+
+        # create the adam optimizer and use fused if available
+        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+        fused = fused_available and "cuda" in device
+        print(f"Using fused AdamW: {fused}")
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=fused, **kwargs)
+        return optimizer
+
     @classmethod
     def from_pretrained(cls, model_type):
         """Loads pretrained GPT-2 model from huggingface"""
@@ -272,6 +299,7 @@ if __name__ == "__main__":
     n_epoch = 50 * 8
     warmup_steps = 10 * 8
     max_lr = 6e-4
+    weight_decay = 0.1
     learning_rate = LRScheduler(max_lr=max_lr, min_lr=0.1 * max_lr, warmup_steps=warmup_steps, max_steps=n_epoch)
     betas = (0.9, 0.95)
     eps = 1e-8
@@ -287,7 +315,9 @@ if __name__ == "__main__":
 
     try:
         print(f"# trainable params: {count_parameters(model):_}")
-        optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=betas, eps=eps)
+        optimizer = model.configure_optimizers(
+            weight_decay=weight_decay, learning_rate=3e-4, device=device, betas=betas, eps=eps
+        )
         for i in range(n_epoch):
             t0 = time.time()
             x, y = train_loader.next_batch()
