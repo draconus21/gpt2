@@ -360,7 +360,7 @@ if __name__ == "__main__":
             optimizer.zero_grad()
 
             loss_accum = 0.0
-            for micro_batch in range(total_batch_size):
+            for micro_batch in range(grad_accum_steps):
                 x, y = train_loader.next_batch()
                 x = x.to(device)
                 y = y.to(device)
