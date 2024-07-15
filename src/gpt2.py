@@ -159,12 +159,17 @@ class GPT(nn.Module):
         loss = F.cross_entropy(logits.view(B * T, C), targets.view(B * T))
         return logits, loss
 
-    def speak(self, prefix_str: str, *, num_return_sequences: int = 5, max_length: int = 30, top_k: int = 50):
+    def speak(
+        self, prefix_str: str, ddp_rank: int, *, num_return_sequences: int = 5, max_length: int = 30, top_k: int = 50
+    ):
         enc = tiktoken.get_encoding("gpt2")
         tokens = enc.encode(prefix_str)
         tokens = torch.tensor(tokens, dtype=torch.long)
         tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
         x = tokens.to(self.device)  # (B, T)
+
+        sample_rng = torch.Generator(device=self.device)
+        sample_rng.manual_seed(42 + ddp_rank)
 
         while (x.shape[1]) < max_length:
             with torch.no_grad():
@@ -177,13 +182,20 @@ class GPT(nn.Module):
                 # keep only the top-k
                 topk_probs, topk_indices = torch.topk(probs, top_k, dim=-1)
                 # sample a token from topk
-                ix = torch.multinomial(topk_probs, 1)  # (B, 1) -> index of sample in vocabulary
+                ix = torch.multinomial(topk_probs, 1, generator=sample_rng)  # (B, 1) -> index of sample in vocabulary
                 # gather the corresponding indices
                 xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
                 # append to the sequence
                 x = torch.cat((x, xcol), dim=1)  # (B, T+1)
 
         return [enc.decode(pred[:max_length].tolist()) for pred in x]
+
+    def speak_to_file(self, fname: str, prefix_str: str, ddp_rank: int, **kwargs):
+        preds = raw_model.speak(prefix_str, ddp_rank, **kwargs)
+        with open(fname, "w") as f:
+            for pred in preds:
+                f.writelines(f"> {pred}\n")
+        return preds
 
     def configure_optimizers(self, weight_decay, learning_rate, device, **kwargs):
         # start with all candidate params that require grad
@@ -288,6 +300,7 @@ class LRScheduler:
 if __name__ == "__main__":
     import os
     import time
+    from pathlib import Path
     from torch.nn.parallel import DistributedDataParallel as DDP
     import torch.distributed as dist
     from torch.distributed import init_process_group, destroy_process_group
@@ -334,6 +347,16 @@ if __name__ == "__main__":
         print(f"total batch size: {total_batch_size}")
         print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
+    prefix_str = "Hello, I am a language model,"
+    max_length = 30
+
+    res_dir = str(Path(f"{__file__}/../../exps/").resolve())
+    n = len(os.listdir(res_dir)) if os.path.exists(res_dir) else 0
+    res_dir = Path(res_dir) / f"exp_{n}"
+    os.makedirs(res_dir)
+
+    valid_freq = 100
+    n_val_step = 20
     n_epoch = 19073  # 10e9/2**19
     warmup_steps = 715
     max_lr = 6e-4
@@ -342,7 +365,11 @@ if __name__ == "__main__":
     betas = (0.9, 0.95)
     eps = 1e-8
 
-    train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size)
+    train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
+    val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
+    if master_process:
+        print({l.split: len(l.shards) for l in [train_loader, val_loader]})
+
     torch.set_float32_matmul_precision("high")  # no change
 
     model = GPT(Config(vocab_size=50304))
@@ -361,6 +388,31 @@ if __name__ == "__main__":
         )
         for i in range(n_epoch):
             t0 = time.time()
+
+            if i % valid_freq == 0:
+                # do validation
+                model.eval()
+                val_loader.reset()
+                with torch.no_grad():
+                    val_loss_accum = 0.0
+                    for _ in range(n_val_step):
+                        x, y = val_loader.next_batch()
+                        x, y = x.to(device), y.to(device)
+                        # with torch.autocast(device_type=device, dtype=torch.bfloat16):  # made it worse
+                        logits, loss = model(x, y)
+                        loss = loss / n_val_step
+                        val_loss_accum += loss.detach()
+                    if ddp:
+                        dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+                if master_process:
+                    print(f"validation loss: {val_loss_accum.item():.4f}")
+                # generate data
+                if i >= 0:
+                    fname = str(res_dir / f"gpt2_{i}_val_{val_loss_accum.item():.4f}.txt")
+                    raw_model.speak_to_file(fname, prefix_str, ddp_rank, max_length=max_length)
+
+            # training loop
+            model.train()
             optimizer.zero_grad()
 
             loss_accum = 0.0
@@ -400,8 +452,8 @@ if __name__ == "__main__":
             destroy_process_group()
         model.eval()
 
-        prefix_str = "Hello, I am a language model,"
-        preds = raw_model.speak(prefix_str, max_length=128)
+        fname = str(res_dir / f"gpt2_{i}.txt")
+        preds = raw_model.speak_to_file(fname, prefix_str, ddp_rank, max_length=max_length)
 
         # print the generated text
         for decoded in preds:

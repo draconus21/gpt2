@@ -18,13 +18,16 @@ class DataLoaderLite:
         self.num_processes = num_processes
 
         assert split in {"train", "val"}
+        self.split = split
 
         # get shard file names
-        data_root = Path(f"{__file__}/../../data/edufileweb10B")
+        data_root = Path(f"{__file__}/../../data/edu_fineweb10B").resolve()
         self.shards = sorted([os.path.join(data_root, s) for s in os.listdir(data_root) if split in s])
 
         assert len(self.shards) > 0, f"no shards found for split {split}"
+        self.reset()
 
+    def reset(self):
         # state, init at shard 0
         self.current_shard = 0
         self.tokens = load_tokens(self.shards[self.current_shard])
