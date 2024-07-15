@@ -288,6 +288,8 @@ class LRScheduler:
 if __name__ == "__main__":
     import os
     import time
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    import torch.distributed as dist
     from torch.distributed import init_process_group, destroy_process_group
 
     # set up DDP (Distributed Data Parallel)
@@ -345,13 +347,16 @@ if __name__ == "__main__":
 
     model = GPT(Config(vocab_size=50304))
     model.to(device)
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank])
+    raw_model = model.module if ddp else model
 
     # gpu is too old for it :(
     # model = torch.compile(model)
 
     try:
         print(f"# trainable params: {count_parameters(model):_}")
-        optimizer = model.configure_optimizers(
+        optimizer = raw_model.configure_optimizers(
             weight_decay=weight_decay, learning_rate=3e-4, device=device, betas=betas, eps=eps
         )
         for i in range(n_epoch):
@@ -368,7 +373,12 @@ if __name__ == "__main__":
                 loss_accum += loss.detach()
 
                 loss = loss / total_batch_size
+                if ddp:
+                    model.require_backward_grad_sync = micro_batch == grad_accum_steps - 1
                 loss.backward()
+
+            if ddp:
+                dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
             norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             lr = learning_rate.get_lr(i)
@@ -378,17 +388,20 @@ if __name__ == "__main__":
             torch.cuda.synchronize()
             t1 = time.time()
             dt = (t1 - t0) * 1000  # ms
-            tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1 - t0)
-            print(
-                f"step {i:3d}: loss: {loss_accum.item():.4f} | lr: {lr:.4e} | norm: {norm:.4f}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.1f}"
-            )
+            tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size) / (t1 - t0)
+            if master_process:
+                print(
+                    f"step {i:3d}: loss: {loss_accum.item():.4f} | lr: {lr:.4e} | norm: {norm:.4f}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.1f}"
+                )
     except KeyboardInterrupt:
         pass
     finally:
+        if ddp:
+            destroy_process_group()
         model.eval()
 
         prefix_str = "Hello, I am a language model,"
-        preds = model.speak(prefix_str)
+        preds = model.speak(prefix_str, max_length=128)
 
         # print the generated text
         for decoded in preds:
