@@ -401,7 +401,7 @@ if __name__ == "__main__":
         model.eval()
 
         prefix_str = "Hello, I am a language model,"
-        preds = model.speak(prefix_str, max_length=128)
+        preds = raw_model.speak(prefix_str, max_length=128)
 
         # print the generated text
         for decoded in preds:
