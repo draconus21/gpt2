@@ -334,8 +334,8 @@ if __name__ == "__main__":
         print(f"total batch size: {total_batch_size}")
         print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
-    n_epoch = 50
-    warmup_steps = 10
+    n_epoch = 19073  # 10e9/2**19
+    warmup_steps = 715
     max_lr = 6e-4
     weight_decay = 0.1
     learning_rate = LRScheduler(max_lr=max_lr, min_lr=0.1 * max_lr, warmup_steps=warmup_steps, max_steps=n_epoch)
