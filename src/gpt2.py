@@ -355,6 +355,24 @@ if __name__ == "__main__":
     res_dir = Path(res_dir) / f"exp_{n}"
     os.makedirs(res_dir)
 
+    best_model_params_path = (Path(res_dir) / "best_params.pt").resolve()
+    best_rmodel_params_path = (Path(res_dir) / "best_raw_model_params.pt").resolve()
+    best_loss = float("inf")
+
+    def _save_best(last=False):
+        if last:
+            print("saving last")
+        print(f"best params [loss: {best_loss:.3f}] saved to: {best_model_params_path}")
+
+        torch.save(
+            model.state_dict(),
+            Path(str(best_model_params_path).replace("best", "last")) if last else best_model_params_path,
+        )
+        torch.save(
+            raw_model.state_dict(),
+            Path(str(best_rmodel_params_path).replace("best", "last")) if last else best_rmodel_params_path,
+        )
+
     valid_freq = 100
     n_val_step = 20
     n_epoch = 19073  # 10e9/2**19
@@ -368,7 +386,7 @@ if __name__ == "__main__":
     train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
     val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
     if master_process:
-        print({l.split: len(l.shards) for l in [train_loader, val_loader]})
+        print("n_shards:", {l.split: len(l.shards) for l in [train_loader, val_loader]})
 
     torch.set_float32_matmul_precision("high")  # no change
 
@@ -406,9 +424,12 @@ if __name__ == "__main__":
                         dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
                 if master_process:
                     print(f"validation loss: {val_loss_accum.item():.4f}")
-                # generate data
-                fname = str(res_dir / f"gpt2_{i-1}_val_{val_loss_accum.item():.4f}.txt")
-                raw_model.speak_to_file(fname, prefix_str, ddp_rank, max_length=max_length)
+                    if val_loss_accum.item() < best_loss:
+                        best_loss = val_loss_accum.item()
+                        _save_best()
+                    # generate data
+                    fname = str(res_dir / f"gpt2_{i-1}_val_{val_loss_accum.item():.4f}.txt")
+                    raw_model.speak_to_file(fname, prefix_str, ddp_rank, max_length=max_length)
 
             # training loop
             model.train()
@@ -449,11 +470,13 @@ if __name__ == "__main__":
     finally:
         if ddp:
             destroy_process_group()
-        model.eval()
+        if master_process:
+            model.eval()
 
-        fname = str(res_dir / f"gpt2_{i-1}.txt")
-        preds = raw_model.speak_to_file(fname, prefix_str, ddp_rank, max_length=max_length)
+            _save_best(last=True)
+            fname = str(res_dir / f"gpt2_{i-1}.txt")
+            preds = raw_model.speak_to_file(fname, prefix_str, ddp_rank, max_length=max_length)
 
-        # print the generated text
-        for decoded in preds:
-            print(f"> {decoded}")
+            # print the generated text
+            for decoded in preds:
+                print(f"> {decoded}")
