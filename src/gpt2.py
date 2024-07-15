@@ -389,7 +389,7 @@ if __name__ == "__main__":
         for i in range(n_epoch):
             t0 = time.time()
 
-            if i % valid_freq == 0:
+            if i % valid_freq == 1:
                 # do validation
                 model.eval()
                 val_loader.reset()
@@ -407,9 +407,8 @@ if __name__ == "__main__":
                 if master_process:
                     print(f"validation loss: {val_loss_accum.item():.4f}")
                 # generate data
-                if i >= 0:
-                    fname = str(res_dir / f"gpt2_{i}_val_{val_loss_accum.item():.4f}.txt")
-                    raw_model.speak_to_file(fname, prefix_str, ddp_rank, max_length=max_length)
+                fname = str(res_dir / f"gpt2_{i-1}_val_{val_loss_accum.item():.4f}.txt")
+                raw_model.speak_to_file(fname, prefix_str, ddp_rank, max_length=max_length)
 
             # training loop
             model.train()
@@ -452,7 +451,7 @@ if __name__ == "__main__":
             destroy_process_group()
         model.eval()
 
-        fname = str(res_dir / f"gpt2_{i}.txt")
+        fname = str(res_dir / f"gpt2_{i-1}.txt")
         preds = raw_model.speak_to_file(fname, prefix_str, ddp_rank, max_length=max_length)
 
         # print the generated text
