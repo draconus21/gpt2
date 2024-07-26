@@ -197,7 +197,7 @@ class GPT(nn.Module):
                 f.writelines(f"> {pred}\n")
         return preds
 
-    def configure_optimizers(self, weight_decay, learning_rate, device, **kwargs):
+    def configure_optimizers(self, weight_decay, learning_rate, device, master_process, **kwargs):
         # start with all candidate params that require grad
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
 
@@ -213,13 +213,15 @@ class GPT(nn.Module):
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
 
-        print(f"num decayed param tensors    : {len(decay_params):3d}, with {num_decay_params:_} params")
-        print(f"num non-decayed param tensors: {len(nodecay_params):3d}, with {num_nodecay_params:_} params")
+        if master_process:
+            print(f"num decayed param tensors    : {len(decay_params):3d}, with {num_decay_params:_} params")
+            print(f"num non-decayed param tensors: {len(nodecay_params):3d}, with {num_nodecay_params:_} params")
 
         # create the adam optimizer and use fused if available
         fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
         fused = fused_available and "cuda" in device
-        print(f"Using fused AdamW: {fused}")
+        if master_process:
+            print(f"Using fused AdamW: {fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=fused, **kwargs)
         return optimizer
 
@@ -337,7 +339,7 @@ if __name__ == "__main__":
 
     # grad accumulation
     total_batch_size = 2**19  # ~0.5M tokens = ~0.5M / 50304
-    B, T = 2, 1024  # micro_batch, seq length
+    B, T = 32, 1024  # micro_batch, seq length
     assert (
         total_batch_size % (B * T * ddp_world_size) == 0
     ), f"total_batch_size [{total_batch_size}] not divisible by B*T*ddp_world_size [{B}*{T}*{ddp_world_size}={B*T*ddp_world_size}]"
@@ -350,14 +352,15 @@ if __name__ == "__main__":
     prefix_str = "Hello, I am a language model,"
     max_length = 30
 
-    res_dir = str(Path(f"{__file__}/../../exps/").resolve())
-    n = len(os.listdir(res_dir)) if os.path.exists(res_dir) else 0
-    res_dir = Path(res_dir) / f"exp_{n}"
-    os.makedirs(res_dir)
+    if master_process:
+        res_dir = str(Path(f"{__file__}/../../exps/").resolve())
+        n = len(os.listdir(res_dir)) if os.path.exists(res_dir) else 0
+        res_dir = Path(res_dir) / f"exp_{n}"
+        os.makedirs(res_dir)
 
-    best_model_params_path = (Path(res_dir) / "best_params.pt").resolve()
-    best_rmodel_params_path = (Path(res_dir) / "best_raw_model_params.pt").resolve()
-    best_loss = float("inf")
+        best_model_params_path = (Path(res_dir) / "best_params.pt").resolve()
+        best_rmodel_params_path = (Path(res_dir) / "best_raw_model_params.pt").resolve()
+        best_loss = float("inf")
 
     def _save_best(last=False):
         if last:
@@ -400,9 +403,10 @@ if __name__ == "__main__":
     model = torch.compile(model)
 
     try:
-        print(f"# trainable params: {count_parameters(model):_}")
+        if master_process:
+            print(f"# trainable params: {count_parameters(model):_}")
         optimizer = raw_model.configure_optimizers(
-            weight_decay=weight_decay, learning_rate=3e-4, device=device, betas=betas, eps=eps
+            weight_decay=weight_decay, learning_rate=3e-4, device=device, betas=betas, eps=eps, master_process=master_process
         )
         for i in range(n_epoch):
             t0 = time.time()
