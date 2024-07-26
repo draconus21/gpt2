@@ -397,7 +397,7 @@ if __name__ == "__main__":
     raw_model = model.module if ddp else model
 
     # gpu is too old for it :(
-    # model = torch.compile(model)
+    model = torch.compile(model)
 
     try:
         print(f"# trainable params: {count_parameters(model):_}")
@@ -416,8 +416,8 @@ if __name__ == "__main__":
                     for _ in range(n_val_step):
                         x, y = val_loader.next_batch()
                         x, y = x.to(device), y.to(device)
-                        # with torch.autocast(device_type=device, dtype=torch.bfloat16):  # made it worse
-                        logits, loss = model(x, y)
+                        with torch.autocast(device_type=device, dtype=torch.bfloat16):  # made it worse
+                            logits, loss = model(x, y)
                         loss = loss / n_val_step
                         val_loss_accum += loss.detach()
                     if ddp:
@@ -440,8 +440,8 @@ if __name__ == "__main__":
                 x, y = train_loader.next_batch()
                 x = x.to(device)
                 y = y.to(device)
-                # with torch.autocast(device_type=device, dtype=torch.bfloat16):  # made it worse
-                logits, loss = model(x, y)
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):  # made it worse
+                    logits, loss = model(x, y)
                 loss_accum += loss.detach()
 
                 loss = loss / total_batch_size
