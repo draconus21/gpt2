@@ -2,6 +2,7 @@ import math
 import torch
 import inspect
 import tiktoken
+from pathlib import Path
 from torch import nn
 from torch.nn import functional as F
 from pydantic import BaseModel
@@ -226,6 +227,17 @@ class GPT(nn.Module):
         return optimizer
 
     @classmethod
+    def from_checkpoint(cls, checkpoint):
+        """Loads wts from a training checkpoint"""
+
+        checkpoint = Path(checkpoint)
+        assert checkpoint.exists() and checkpoint.is_file()
+        model = GPT(Config(vocab_size=50304))
+        _checkpoint = torch.load(checkpoint)
+        model.load_state_dict(_checkpoint)
+        return model
+
+    @classmethod
     def from_pretrained(cls, model_type):
         """Loads pretrained GPT-2 model from huggingface"""
 
@@ -302,7 +314,6 @@ class LRScheduler:
 if __name__ == "__main__":
     import os
     import time
-    from pathlib import Path
     from torch.nn.parallel import DistributedDataParallel as DDP
     import torch.distributed as dist
     from torch.distributed import init_process_group, destroy_process_group
@@ -406,7 +417,12 @@ if __name__ == "__main__":
         if master_process:
             print(f"# trainable params: {count_parameters(model):_}")
         optimizer = raw_model.configure_optimizers(
-            weight_decay=weight_decay, learning_rate=3e-4, device=device, betas=betas, eps=eps, master_process=master_process
+            weight_decay=weight_decay,
+            learning_rate=3e-4,
+            device=device,
+            betas=betas,
+            eps=eps,
+            master_process=master_process,
         )
         for i in range(n_epoch):
             t0 = time.time()
